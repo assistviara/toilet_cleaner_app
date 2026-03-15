@@ -10,6 +10,7 @@ from toilet_logic import (
     is_eligible_for_cleaning,
     parse_skip_words,
     build_schedule_from_row_staff_table,
+    rotate_queue_from_last,
 )
 
 
@@ -42,15 +43,27 @@ def test_is_eligible_for_cleaning_skip_word_exact_or_contained():
     assert is_eligible_for_cleaning("通常勤務", skip_duty_words={"研修", "出張"}) is True
 
 
+def test_rotate_queue_from_last():
+    queue = ["A", "B", "C", "D"]
+    rotated = rotate_queue_from_last(queue, "B")
+    assert rotated == ["C", "D", "A", "B"]
+
+
+def test_rotate_queue_from_last_when_name_not_found():
+    queue = ["A", "B", "C"]
+    rotated = rotate_queue_from_last(queue, "Z")
+    assert rotated == ["A", "B", "C"]
+
+
 def test_build_schedule_basic_rotation():
     df = pd.DataFrame({
         "氏名": ["A", "B", "C", "D"],
         "男性チェック": ["△", "△", "", ""],
-        "社員チェック": ["", "", "", "x"],   # D は社員除外
-        "1": ["", "", "", ""],
-        "2": ["×", "", "", ""],              # A は休み
-        "3": ["", "", "研修", ""],           # C は研修で除外
-        "4": ["", "×", "", ""],              # B は休み
+        "社員チェック": ["", "", "", "〇"],   # D は社員除外
+        "1": ["", "", "", "×"],
+        "2": ["×", "", "×", ""],
+        "3": ["", "", "研修", ""],
+        "4": ["", "×", "", ""],
     })
 
     result_df, summary_df = build_schedule_from_row_staff_table(
@@ -63,7 +76,7 @@ def test_build_schedule_basic_rotation():
     )
 
     expected_male = ["A", "B", "A", "A"]
-    expected_female = ["C", "C", None, "C"]
+    expected_female = ["C", None, None, "C"]
 
     assert result_df["男性便所担当"].tolist() == expected_male
 
@@ -78,6 +91,7 @@ def test_build_schedule_basic_rotation():
     assert d_row["社員除外"] == "はい"
     assert d_row["担当回数"] == 0
 
+
 def test_skip_word_changes_assignment():
     df = pd.DataFrame({
         "氏名": ["井上", "大久保", "竹畠"],
@@ -85,7 +99,9 @@ def test_skip_word_changes_assignment():
         "社員チェック": ["", "", ""],
         "1": ["", "", ""],
         "2": ["", "", ""],
-        "3": ["出張", "", ""],   # 井上を除外して差が出るようにする
+        "3": ["出張", "", ""],   # 井上はこの日除外
+        "4": ["", "", ""],
+        "5": ["×", "×", "×"],   # 全員 clean_staff_rows を通すため
     })
 
     result_df, _ = build_schedule_from_row_staff_table(
@@ -93,65 +109,28 @@ def test_skip_word_changes_assignment():
         name_col="氏名",
         male_col="男性チェック",
         employee_col="社員チェック",
-        day_cols=["1", "2", "3"],
+        day_cols=["1", "2", "3", "4", "5"],
         skip_duty_words={"出張"},
     )
 
     # 1日: 井上
     # 2日: 大久保
-    # 3日: 本来は井上に戻りうるが、出張なので除外され大久保
-    assert result_df["男性便所担当"].tolist() == ["井上", "大久保", "大久保"]
+    # 3日: 井上は出張なので除外され、大久保
+    # 4日: この時点では負担率の都合で井上に戻る
+    assert result_df["男性便所担当"].tolist()[:4] == ["井上", "大久保", "大久保", "井上"]
 
 
-    def test_fairness_counts_not_extreme_when_all_work_evenly():
-        df = pd.DataFrame({
-            "氏名": ["A", "B", "C", "D"],
-            "男性チェック": ["△", "△", "", ""],
-            "社員チェック": ["", "", "", ""],
-            "1": ["", "", "", ""],
-            "2": ["", "", "", ""],
-            "3": ["", "", "", ""],
-            "4": ["", "", "", ""],
-            "5": ["", "", "", ""],
-            "6": ["", "", "", ""],
-        })
-
-        result_df, summary_df = build_schedule_from_row_staff_table(
-            df=df,
-            name_col="氏名",
-            male_col="男性チェック",
-            employee_col="社員チェック",
-            day_cols=["1", "2", "3", "4", "5", "6"],
-            skip_duty_words=set(),
-        )
-
-        # 男性は A, B の2人で6日を回す → 3回ずつ
-        male_summary = summary_df[
-            (summary_df["性別区分"] == "男性") & (summary_df["社員除外"] == "いいえ")
-        ].sort_values("職員名")
-
-        male_counts = male_summary["担当回数"].tolist()
-        assert male_counts == [3, 3]
-
-        # 女性は C, D の2人で6日を回す → 3回ずつ
-        female_summary = summary_df[
-            (summary_df["性別区分"] == "女性") & (summary_df["社員除外"] == "いいえ")
-        ].sort_values("職員名")
-
-        female_counts = female_summary["担当回数"].tolist()
-        assert female_counts == [3, 3]
-
-def test_fairness_by_ratio_protects_low_attendance_staff():
+def test_fairness_counts_not_extreme_when_all_work_evenly():
     df = pd.DataFrame({
-        "氏名": ["A", "B", "C"],
-        "男性チェック": ["△", "△", "△"],
-        "社員チェック": ["", "", ""],
-        "1": ["", "", ""],
-        "2": ["", "", ""],
-        "3": ["", "", "×"],
-        "4": ["", "", "×"],
-        "5": ["", "", "×"],
-        "6": ["", "", "×"],
+        "氏名": ["A", "B", "C", "D"],
+        "男性チェック": ["△", "△", "", ""],
+        "社員チェック": ["", "", "", ""],
+        "1": ["", "", "", ""],
+        "2": ["", "", "", ""],
+        "3": ["", "", "", ""],
+        "4": ["", "", "", ""],
+        "5": ["×", "", "×", ""],   # A, C に ×
+        "6": ["", "×", "", "×"],   # B, D に ×
     })
 
     result_df, summary_df = build_schedule_from_row_staff_table(
@@ -163,17 +142,51 @@ def test_fairness_by_ratio_protects_low_attendance_staff():
         skip_duty_words=set(),
     )
 
-    # C は出勤可能日数が 2 日しかないので、
-    # 回数だけで均等化しすぎないことを確認する
+    male_summary = summary_df[
+        (summary_df["性別区分"] == "男性") & (summary_df["社員除外"] == "いいえ")
+    ].sort_values("職員名")
+
+    male_counts = male_summary["担当回数"].tolist()
+    assert male_counts == [3, 3]
+
+    female_summary = summary_df[
+        (summary_df["性別区分"] == "女性") & (summary_df["社員除外"] == "いいえ")
+    ].sort_values("職員名")
+
+    female_counts = female_summary["担当回数"].tolist()
+    assert female_counts == [3, 3]
+
+
+def test_fairness_by_ratio_protects_low_attendance_staff():
+    df = pd.DataFrame({
+        "氏名": ["A", "B", "C"],
+        "男性チェック": ["△", "△", "△"],
+        "社員チェック": ["", "", ""],
+        "1": ["", "", ""],
+        "2": ["", "", ""],
+        "3": ["", "", "×"],
+        "4": ["", "", "×"],
+        "5": ["×", "", "×"],   # A にも × を入れて clean を通す
+        "6": ["", "×", "×"],   # B にも × を入れて clean を通す
+    })
+
+    result_df, summary_df = build_schedule_from_row_staff_table(
+        df=df,
+        name_col="氏名",
+        male_col="男性チェック",
+        employee_col="社員チェック",
+        day_cols=["1", "2", "3", "4", "5", "6"],
+        skip_duty_words=set(),
+    )
+
     c_row = summary_df[summary_df["職員名"] == "C"].iloc[0]
     a_row = summary_df[summary_df["職員名"] == "A"].iloc[0]
     b_row = summary_df[summary_df["職員名"] == "B"].iloc[0]
 
     assert c_row["出勤可能日数"] == 2
-    assert a_row["出勤可能日数"] == 6
-    assert b_row["出勤可能日数"] == 6
+    assert a_row["出勤可能日数"] == 5
+    assert b_row["出勤可能日数"] == 5
 
-    # C の担当率が、A/B より極端に高くなっていないこと
     assert c_row["担当率"] <= max(a_row["担当率"], b_row["担当率"]) + 0.01
 
 
@@ -182,8 +195,8 @@ def test_blank_name_rows_are_ignored():
         "氏名": ["A", "", "B"],
         "男性チェック": ["△", "", ""],
         "社員チェック": ["", "", ""],
-        "1": ["", "", "×"],   # B に勤務情報を入れる
-        "2": ["", "", ""],
+        "1": ["", "", "×"],
+        "2": ["×", "", ""],   # A にも × を入れる
         "3": ["", "", ""],
     })
 
@@ -196,23 +209,21 @@ def test_blank_name_rows_are_ignored():
         skip_duty_words=set(),
     )
 
-    # 名前空欄の行が集計対象に入らない
     assert "" not in summary_df["職員名"].fillna("").tolist()
 
-    # 男性担当に空欄名が出ない
-    male_names = [x for x in result_df["男性便所担当"].tolist() if x is not None]
+    male_names = [x for x in result_df["男性便所担当"].tolist() if pd.notna(x)]
     assert "" not in male_names
 
-    # 女性担当に空欄名が出ない
-    female_names = [x for x in result_df["女性便所担当"].tolist() if x is not None]
+    female_names = [x for x in result_df["女性便所担当"].tolist() if pd.notna(x)]
     assert "" not in female_names
+
 
 def test_clean_staff_rows_ignores_blank_and_formula_like_rows():
     df = pd.DataFrame({
-        "氏名": ["A", "", "", "B"],
+        "氏名": ["A", "", "=COUNTA(B:B)", "B"],
         "男性チェック": ["△", "", "", ""],
         "社員チェック": ["", "", "", ""],
-        "1": ["", "", "", "×"],   # B に勤務表らしい情報を入れる
+        "1": ["", "", "", "×"],
         "2": ["×", "", "", ""],
         "3": ["", "", "", ""],
     })
@@ -231,10 +242,12 @@ def test_clean_staff_rows_ignores_blank_and_formula_like_rows():
     assert "A" in names
     assert "B" in names
     assert "" not in names
+    assert "=COUNTA(B:B)" not in names
+
 
 def test_formula_like_rows_are_ignored():
     df = pd.DataFrame({
-        "氏名": ["A", "", "平均"],
+        "氏名": ["A", "=COUNTA(B:B)", "18"],
         "男性チェック": ["△", "", ""],
         "社員チェック": ["", "", ""],
         "1": ["", "", ""],
@@ -253,4 +266,34 @@ def test_formula_like_rows_are_ignored():
 
     names = summary_df["職員名"].fillna("").tolist()
     assert "A" in names
-    assert "平均" not in names
+    assert "=COUNTA(B:B)" not in names
+    assert "18" not in names
+
+
+def test_previous_last_person_changes_start_position():
+    df = pd.DataFrame({
+        "氏名": ["A", "B", "C", "D"],
+        "男性チェック": ["△", "△", "", ""],
+        "社員チェック": ["", "", "", ""],
+        "1": ["", "", "", ""],
+        "2": ["", "", "", ""],
+        "3": ["", "", "", ""],
+        "4": ["×", "×", "×", "×"],   # 全員 clean を通すために × を持たせる
+    })
+
+    result_df, summary_df = build_schedule_from_row_staff_table(
+        df=df,
+        name_col="氏名",
+        male_col="男性チェック",
+        employee_col="社員チェック",
+        day_cols=["1", "2", "3", "4"],
+        skip_duty_words=set(),
+        previous_male_last="A",
+        previous_female_last="C",
+    )
+
+    # 男性は A の次なので B から開始
+    assert result_df["男性便所担当"].tolist()[0] == "B"
+
+    # 女性は C の次なので D から開始
+    assert result_df["女性便所担当"].tolist()[0] == "D"
