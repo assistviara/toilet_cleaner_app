@@ -143,49 +143,49 @@ def assign_one_keep_order(queue: deque, eligible_staff_today: set[str]) -> Optio
     return chosen
 
 
-def assign_one_fair_by_ratio_with_order(
-    queue: list[str],
-    eligible_staff_today: set[str],
-    assigned_counts: dict[str, int],
-    eligible_days: dict[str, int],
-    last_assigned_day: dict[str, int],
-    current_day_index: int,
-) -> Optional[str]:
+def rotate_queue_from_last(queue: list[str], last_person: Optional[str]) -> list[str]:
     """
-    負担率を優先しつつ、同率なら元の順番を優先する版
+    last_person の次の人が先頭になるように queue を回転させる
+    例:
+    queue = [A, B, C, D], last_person = B
+    -> [C, D, A, B]
     """
-    if not eligible_staff_today:
-        return None
+    if not queue or not last_person:
+        return queue.copy()
 
-    def load_ratio(name: str) -> float:
-        days = eligible_days.get(name, 0)
-        if days <= 0:
-            return float("inf")
-        return assigned_counts[name] / days
+    if last_person not in queue:
+        return queue.copy()
 
-    min_ratio = min(load_ratio(name) for name in eligible_staff_today)
+    idx = queue.index(last_person)
+    return queue[idx + 1:] + queue[:idx + 1]
 
-    ratio_candidates = {
-        name for name in eligible_staff_today
-        if load_ratio(name) == min_ratio
-    }
 
-    chosen = None
-    for name in queue:
-        if name in ratio_candidates:
-            chosen = name
-            break
+def read_last_assignees(previous_schedule_path: str) -> tuple[Optional[str], Optional[str]]:
+    """
+    前回作成済みの当番表Excelから、
+    最後に担当した男性・女性を読む
+    対象シート: 日別担当表
+    """
+    try:
+        df = pd.read_excel(previous_schedule_path, sheet_name="日別担当表")
 
-    if chosen is None:
-        return None
+        male_last = None
+        female_last = None
 
-    assigned_counts[chosen] += 1
-    last_assigned_day[chosen] = current_day_index
+        if "男性便所担当" in df.columns:
+            male_series = df["男性便所担当"].dropna().astype(str).str.strip()
+            if not male_series.empty:
+                male_last = male_series.iloc[-1]
 
-    queue.remove(chosen)
-    queue.append(chosen)
+        if "女性便所担当" in df.columns:
+            female_series = df["女性便所担当"].dropna().astype(str).str.strip()
+            if not female_series.empty:
+                female_last = female_series.iloc[-1]
 
-    return chosen
+        return male_last, female_last
+
+    except Exception:
+        return None, None
 
 
 # =========================
@@ -284,40 +284,6 @@ def clean_staff_rows(
     return work_df
 
 
-def count_eligible_days(
-    work_df: pd.DataFrame,
-    name_col,
-    day_cols: list,
-    off_words: Optional[Iterable[str]] = None,
-    skip_duty_words: Optional[Iterable[str]] = None,
-) -> dict[str, int]:
-    """
-    各職員の「掃除担当候補になれる日数」を数える
-    """
-    eligible_days = {}
-
-    for _, row in work_df.iterrows():
-        name = row[name_col]
-
-        if row["__is_employee"]:
-            eligible_days[name] = 0
-            continue
-
-        count = 0
-        for day in day_cols:
-            status = row[day]
-            if is_eligible_for_cleaning(
-                status,
-                off_words=off_words,
-                skip_duty_words=skip_duty_words,
-            ):
-                count += 1
-
-        eligible_days[name] = count
-
-    return eligible_days
-
-
 def build_schedule_from_row_staff_table(
     df: pd.DataFrame,
     name_col,
@@ -341,14 +307,6 @@ def build_schedule_from_row_staff_table(
     work_df["__is_male"] = work_df[male_col].apply(is_checked)
     work_df["__is_employee"] = work_df[employee_col].apply(is_checked)
 
-    eligible_days_all = count_eligible_days(
-        work_df=work_df,
-        name_col=name_col,
-        day_cols=day_cols,
-        off_words=off_words,
-        skip_duty_words=skip_duty_words,
-    )
-
     male_candidates = work_df[
         (work_df["__is_male"]) & (~work_df["__is_employee"])
     ][name_col].tolist()
@@ -361,21 +319,15 @@ def build_schedule_from_row_staff_table(
         work_df["__is_employee"]
     ][name_col].tolist()
 
-    male_eligible_days = {name: eligible_days_all[name] for name in male_candidates}
-    female_eligible_days = {name: eligible_days_all[name] for name in female_candidates}
+    male_queue = deque(rotate_queue_from_last(male_candidates, previous_male_last))
+    female_queue = deque(rotate_queue_from_last(female_candidates, previous_female_last))
 
     male_counts = {name: 0 for name in male_candidates}
     female_counts = {name: 0 for name in female_candidates}
 
-    male_last_assigned = {name: -1 for name in male_candidates}
-    female_last_assigned = {name: -1 for name in female_candidates}
-
-    male_queue = rotate_queue_from_last(male_candidates, previous_male_last)
-    female_queue = rotate_queue_from_last(female_candidates, previous_female_last)
-
     day_records = []
 
-    for day_index, day in enumerate(day_cols):
+    for day in day_cols:
         male_eligible = set()
         female_eligible = set()
 
@@ -399,23 +351,20 @@ def build_schedule_from_row_staff_table(
             else:
                 female_eligible.add(name)
 
-        male_person = assign_one_fair_by_ratio_with_order(
+        male_person = assign_one_keep_order(
             queue=male_queue,
             eligible_staff_today=male_eligible,
-            assigned_counts=male_counts,
-            eligible_days=male_eligible_days,
-            last_assigned_day=male_last_assigned,
-            current_day_index=day_index,
         ) if male_candidates else None
 
-        female_person = assign_one_fair_by_ratio_with_order(
+        female_person = assign_one_keep_order(
             queue=female_queue,
             eligible_staff_today=female_eligible,
-            assigned_counts=female_counts,
-            eligible_days=female_eligible_days,
-            last_assigned_day=female_last_assigned,
-            current_day_index=day_index,
         ) if female_candidates else None
+
+        if male_person:
+            male_counts[male_person] += 1
+        if female_person:
+            female_counts[female_person] += 1
 
         remarks = []
         if male_candidates and not male_person:
@@ -438,27 +387,19 @@ def build_schedule_from_row_staff_table(
     summary_rows = []
 
     for name in male_candidates:
-        days = male_eligible_days[name]
-        count = male_counts[name]
         summary_rows.append({
             "職員名": name,
             "性別区分": "男性",
             "社員除外": "いいえ",
-            "出勤可能日数": days,
-            "担当回数": count,
-            "担当率": round(count / days, 4) if days > 0 else 0,
+            "担当回数": male_counts[name],
         })
 
     for name in female_candidates:
-        days = female_eligible_days[name]
-        count = female_counts[name]
         summary_rows.append({
             "職員名": name,
             "性別区分": "女性",
             "社員除外": "いいえ",
-            "出勤可能日数": days,
-            "担当回数": count,
-            "担当率": round(count / days, 4) if days > 0 else 0,
+            "担当回数": female_counts[name],
         })
 
     for name in excluded_staff:
@@ -470,14 +411,12 @@ def build_schedule_from_row_staff_table(
             "職員名": name,
             "性別区分": gender,
             "社員除外": "はい",
-            "出勤可能日数": 0,
             "担当回数": 0,
-            "担当率": 0,
         })
 
     summary_df = pd.DataFrame(summary_rows).sort_values(
-        ["社員除外", "性別区分", "担当率", "担当回数", "職員名"],
-        ascending=[True, True, False, False, True]
+        ["社員除外", "性別区分", "担当回数", "職員名"],
+        ascending=[True, True, False, True]
     ).reset_index(drop=True)
 
     return result_df, summary_df
@@ -500,7 +439,6 @@ def export_schedule_excel(
     """
     df = pd.read_excel(input_path, sheet_name=sheet_name, header=None)
 
-    # 前回担当者取得
     previous_male_last = None
     previous_female_last = None
 
@@ -528,54 +466,4 @@ def export_schedule_excel(
         result_df.to_excel(writer, sheet_name="日別担当表", index=False)
         summary_df.to_excel(writer, sheet_name="担当回数集計", index=False)
 
-        sheet = writer.book["担当回数集計"]
-
-        # F列 = 担当率
-        for cell in sheet["F"][1:]:
-            cell.number_format = "0.00%"
-
     return output_path
-
-def read_last_assignees(previous_schedule_path: str) -> tuple[Optional[str], Optional[str]]:
-    """
-    前回作成済みの当番表Excelから、
-    最後に担当した男性・女性を読む
-    対象シート: 日別担当表
-    """
-    try:
-        df = pd.read_excel(previous_schedule_path, sheet_name="日別担当表")
-
-        male_last = None
-        female_last = None
-
-        if "男性便所担当" in df.columns:
-            male_series = df["男性便所担当"].dropna().astype(str).str.strip()
-            if not male_series.empty:
-                male_last = male_series.iloc[-1]
-
-        if "女性便所担当" in df.columns:
-            female_series = df["女性便所担当"].dropna().astype(str).str.strip()
-            if not female_series.empty:
-                female_last = female_series.iloc[-1]
-
-        return male_last, female_last
-
-    except Exception:
-        return None, None
-    
-def rotate_queue_from_last(queue: list[str], last_person: Optional[str]) -> list[str]:
-    """
-    last_person の次の人が先頭になるように queue を回転させる
-    例:
-    queue = [A, B, C, D], last_person = B
-    -> [C, D, A, B]
-    """
-    if not queue or not last_person:
-        return queue.copy()
-
-    if last_person not in queue:
-        return queue.copy()
-
-    idx = queue.index(last_person)
-    return queue[idx + 1:] + queue[:idx + 1]
-    

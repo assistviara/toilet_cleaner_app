@@ -120,74 +120,6 @@ def test_skip_word_changes_assignment():
     assert result_df["男性便所担当"].tolist()[:4] == ["井上", "大久保", "大久保", "井上"]
 
 
-def test_fairness_counts_not_extreme_when_all_work_evenly():
-    df = pd.DataFrame({
-        "氏名": ["A", "B", "C", "D"],
-        "男性チェック": ["△", "△", "", ""],
-        "社員チェック": ["", "", "", ""],
-        "1": ["", "", "", ""],
-        "2": ["", "", "", ""],
-        "3": ["", "", "", ""],
-        "4": ["", "", "", ""],
-        "5": ["×", "", "×", ""],   # A, C に ×
-        "6": ["", "×", "", "×"],   # B, D に ×
-    })
-
-    result_df, summary_df = build_schedule_from_row_staff_table(
-        df=df,
-        name_col="氏名",
-        male_col="男性チェック",
-        employee_col="社員チェック",
-        day_cols=["1", "2", "3", "4", "5", "6"],
-        skip_duty_words=set(),
-    )
-
-    male_summary = summary_df[
-        (summary_df["性別区分"] == "男性") & (summary_df["社員除外"] == "いいえ")
-    ].sort_values("職員名")
-
-    male_counts = male_summary["担当回数"].tolist()
-    assert male_counts == [3, 3]
-
-    female_summary = summary_df[
-        (summary_df["性別区分"] == "女性") & (summary_df["社員除外"] == "いいえ")
-    ].sort_values("職員名")
-
-    female_counts = female_summary["担当回数"].tolist()
-    assert female_counts == [3, 3]
-
-
-def test_fairness_by_ratio_protects_low_attendance_staff():
-    df = pd.DataFrame({
-        "氏名": ["A", "B", "C"],
-        "男性チェック": ["△", "△", "△"],
-        "社員チェック": ["", "", ""],
-        "1": ["", "", ""],
-        "2": ["", "", ""],
-        "3": ["", "", "×"],
-        "4": ["", "", "×"],
-        "5": ["×", "", "×"],   # A にも × を入れて clean を通す
-        "6": ["", "×", "×"],   # B にも × を入れて clean を通す
-    })
-
-    result_df, summary_df = build_schedule_from_row_staff_table(
-        df=df,
-        name_col="氏名",
-        male_col="男性チェック",
-        employee_col="社員チェック",
-        day_cols=["1", "2", "3", "4", "5", "6"],
-        skip_duty_words=set(),
-    )
-
-    c_row = summary_df[summary_df["職員名"] == "C"].iloc[0]
-    a_row = summary_df[summary_df["職員名"] == "A"].iloc[0]
-    b_row = summary_df[summary_df["職員名"] == "B"].iloc[0]
-
-    assert c_row["出勤可能日数"] == 2
-    assert a_row["出勤可能日数"] == 5
-    assert b_row["出勤可能日数"] == 5
-
-    assert c_row["担当率"] <= max(a_row["担当率"], b_row["担当率"]) + 0.01
 
 
 def test_blank_name_rows_are_ignored():
@@ -297,3 +229,64 @@ def test_previous_last_person_changes_start_position():
 
     # 女性は C の次なので D から開始
     assert result_df["女性便所担当"].tolist()[0] == "D"
+
+def test_keep_order_rotation_basic():
+    df = pd.DataFrame({
+        "氏名": ["A", "B", "C", "D"],
+        "男性チェック": ["△", "△", "", ""],
+        "社員チェック": ["", "", "", "〇"],   # D は社員
+        "1": ["", "", "", "×"],
+        "2": ["×", "", "×", ""],
+        "3": ["", "", "研修", ""],
+        "4": ["", "×", "", ""],
+    })
+
+    result_df, summary_df = build_schedule_from_row_staff_table(
+        df=df,
+        name_col="氏名",
+        male_col="男性チェック",
+        employee_col="社員チェック",
+        day_cols=["1", "2", "3", "4"],
+        skip_duty_words={"研修"},
+    )
+
+    # 男性は順番どおり
+    assert result_df["男性便所担当"].tolist() == ["A", "B", "A", "A"]
+
+    # 女性は C のみ（D は社員）
+    actual_female = result_df["女性便所担当"].tolist()
+    expected_female = ["C", None, None, "C"]
+
+    for actual, expected in zip(actual_female, expected_female):
+        if expected is None:
+            assert pd.isna(actual)
+        else:
+            assert actual == expected
+
+def test_skip_keeps_order_and_skips_absent_person():
+    df = pd.DataFrame({
+        "氏名": ["井上", "大久保", "竹畠"],
+        "男性チェック": ["△", "△", ""],
+        "社員チェック": ["", "", ""],
+        "1": ["", "", ""],
+        "2": ["", "", ""],
+        "3": ["出張", "", ""],
+        "4": ["", "", ""],
+        "5": ["×", "×", "×"],
+    })
+
+    result_df, _ = build_schedule_from_row_staff_table(
+        df=df,
+        name_col="氏名",
+        male_col="男性チェック",
+        employee_col="社員チェック",
+        day_cols=["1", "2", "3", "4", "5"],
+        skip_duty_words={"出張"},
+    )
+
+    # 順番制:
+    # 1日 井上
+    # 2日 大久保
+    # 3日 井上は出張なのでスキップ、大久保
+    # 4日 次は井上
+    assert result_df["男性便所担当"].tolist()[:4] == ["井上", "大久保", "大久保", "井上"]
